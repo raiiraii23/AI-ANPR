@@ -1,0 +1,81 @@
+# Claude Code
+CLAUDE.md
+.claude/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+*.so
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.cover
+
+# AI Model weights (large binaries — download separately)
+*.pt
+*.pth
+*.onnx
+*.pb
+*.tflite
+*.weights
+
+# Captured violation images (runtime data, not source)
+backend/captures/
+captures/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+*.tsbuildinfo
+next-env.d.ts
+.vercel/
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker volumes / data
+postgres_data/
+
+# Misc
+*.tmp
+*.bak

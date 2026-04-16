@@ -6,75 +6,87 @@ import {
   CheckCircle2,
   XCircle,
   Activity,
-  Volume2,
   Camera,
   RefreshCw,
-  Wifi,
   WifiOff,
   Bell,
 } from "lucide-react";
 import {
   getViolations,
+  getDetections,
+  resetDetections,
   getStats,
   getSystemStatus,
   updateViolationStatus,
   createWebSocket,
   type Violation,
+  type Detection,
   type Stats,
   type SystemStatus,
 } from "./lib/api";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-const DB_HISTORY_SIZE = 80;
+const PH_TZ = "Asia/Manila";
+const MAX_DB_KEY = "anpr.maxDb";
+const MONITOR_BARS = 96; // ~9.6s of history at 10 Hz
 
-// ─── Sparkline ────────────────────────────────────────────────────────────────
-function Sparkline({ data, threshold }: { data: number[]; threshold: number }) {
-  const W = 600;
-  const H = 56;
-  const max = 140;
-  if (data.length < 2) return null;
+// Visualizer dB band — narrow window for high sensitivity to small changes.
+// Anything below DB_FLOOR is silence; above DB_CEIL is clipped to full bar.
+const DB_FLOOR = 40;
+const DB_CEIL = 110;
+const dbToPct = (v: number) =>
+  Math.max(0, Math.min(100, ((v - DB_FLOOR) / (DB_CEIL - DB_FLOOR)) * 100));
 
-  const pts = data
-    .map((v, i) => `${(i / (DB_HISTORY_SIZE - 1)) * W},${H - (v / max) * H}`)
-    .join(" ");
-  const area = `0,${H} ${pts} ${W},${H}`;
-  const thY = H - (threshold / max) * H;
-
+// ─── LiveMonitor ──────────────────────────────────────────────────────────────
+function LiveMonitor({ history, threshold }: { history: number[]; threshold: number }) {
+  const thresholdTopPct = 100 - dbToPct(threshold);
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      className="w-full mt-3"
-      style={{ height: 56 }}
-      preserveAspectRatio="none"
-    >
-      <defs>
-        <linearGradient id="sparkGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#3b82f6" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="#3b82f6" stopOpacity="0" />
-        </linearGradient>
-      </defs>
-      {/* threshold dashed line */}
-      <line
-        x1="0" y1={thY} x2={W} y2={thY}
-        stroke="#ef4444" strokeWidth="1.5" strokeDasharray="6,4" opacity="0.7"
+    <div className="relative h-28 bg-black/40 border border-gray-800 rounded-lg overflow-hidden px-2 py-2">
+      {/* Threshold guide line */}
+      <div
+        className="absolute left-0 right-0 border-t border-dashed border-red-500/50 pointer-events-none"
+        style={{ top: `${thresholdTopPct}%` }}
       />
-      {/* area fill */}
-      <polygon points={area} fill="url(#sparkGrad)" />
-      {/* line */}
-      <polyline points={pts} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinejoin="round" />
-      {/* live dot */}
-      {(() => {
-        const last = data[data.length - 1];
-        const x = W;
-        const y = H - (last / max) * H;
-        return (
-          <circle cx={x} cy={y} r="3" fill="#3b82f6">
-            <animate attributeName="r" values="3;5;3" dur="1s" repeatCount="indefinite" />
-            <animate attributeName="opacity" values="1;0.4;1" dur="1s" repeatCount="indefinite" />
-          </circle>
-        );
-      })()}
-    </svg>
+      <div
+        className="absolute left-2 text-[10px] text-red-400/70 font-mono pointer-events-none"
+        style={{ top: `calc(${thresholdTopPct}% - 12px)` }}
+      >
+        {threshold} dB
+      </div>
+
+      <div className="relative h-full w-full flex items-end justify-between gap-[2px]">
+        {history.map((v, i) => {
+          const h = Math.max(2, dbToPct(v));
+          const isAlert = v >= threshold;
+          const isWarn = v >= threshold * 0.85;
+          const color = isAlert
+            ? "bg-red-500"
+            : isWarn
+            ? "bg-yellow-400"
+            : "bg-green-500";
+          const isLatest = i === history.length - 1;
+          return (
+            <div
+              key={i}
+              className={`flex-1 rounded-[2px] ${color} transition-all duration-75 ease-out`}
+              style={{
+                height: `${h}%`,
+                opacity: 0.35 + (i / history.length) * 0.65,
+                boxShadow: isLatest
+                  ? `0 0 10px ${
+                      isAlert
+                        ? "rgba(239,68,68,0.9)"
+                        : isWarn
+                        ? "rgba(250,204,21,0.8)"
+                        : "rgba(34,197,94,0.7)"
+                    }`
+                  : undefined,
+              }}
+            />
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -82,85 +94,110 @@ function Sparkline({ data, threshold }: { data: number[]; threshold: number }) {
 function DbMeter({
   value,
   threshold = 99,
+  maxRecorded,
   history,
-  peakDb,
 }: {
   value: number;
   threshold?: number;
+  maxRecorded: number;
   history: number[];
-  peakDb: number;
 }) {
-  const pct = Math.min(100, (value / 140) * 100);
-  const peakPct = Math.min(100, (peakDb / 140) * 100);
   const isAlert = value >= threshold;
   const isWarn = value >= threshold * 0.85;
 
-  const barColor = isAlert ? "bg-red-500" : isWarn ? "bg-yellow-400" : "bg-green-500";
   const textColor = isAlert ? "text-red-400" : isWarn ? "text-yellow-300" : "text-green-400";
+  const ringColor = isAlert ? "bg-red-500/40" : isWarn ? "bg-yellow-400/30" : "bg-green-500/25";
+  const dotColor = isAlert ? "bg-red-500" : isWarn ? "bg-yellow-400" : "bg-green-500";
+  const glowColor = isAlert
+    ? "rgba(239,68,68,0.9)"
+    : isWarn
+    ? "rgba(250,204,21,0.7)"
+    : "rgba(34,197,94,0.8)";
 
-  return (
-    <div className="flex flex-col gap-3">
-      {/* Large live value */}
-      <div className="flex items-end justify-between gap-4">
+  // Pulse intensity — scales across the visualizer band so quiet variations
+  // still produce visible motion.
+  const pulse = Math.max(0, Math.min(1, (value - DB_FLOOR) / (threshold - DB_FLOOR)));
+  const ringScale = 1 + pulse * 0.5;
+  const ringOpacity = 0.35 + pulse * 0.55;
+
+  const maxIsAlert = maxRecorded >= threshold;
+  const maxColor = maxIsAlert
+    ? "text-red-400"
+    : maxRecorded >= threshold * 0.85
+    ? "text-yellow-300"
+    : "text-green-400";
+
+  const top = (
+    <div className="flex flex-col md:flex-row items-stretch gap-6">
+      {/* Live meter — big pulsing dB */}
+      <div className="flex-1 flex items-center gap-6">
+        <div className="relative w-28 h-28 flex items-center justify-center flex-shrink-0">
+          <div
+            className={`absolute inset-0 rounded-full ${ringColor} transition-all duration-100 ease-out`}
+            style={{
+              transform: `scale(${ringScale})`,
+              opacity: ringOpacity,
+              filter: `blur(${6 + pulse * 12}px)`,
+            }}
+          />
+          <div
+            className={`absolute inset-3 rounded-full ${ringColor} transition-all duration-100 ease-out`}
+            style={{ transform: `scale(${1 + pulse * 0.2})`, opacity: 0.55 }}
+          />
+          <div
+            className={`relative w-9 h-9 rounded-full ${dotColor} transition-colors duration-150`}
+            style={{ boxShadow: `0 0 ${10 + pulse * 28}px ${glowColor}` }}
+          />
+        </div>
         <div>
-          <div className={`text-6xl font-bold font-mono tabular-nums leading-none transition-colors duration-150 ${textColor}`}>
+          <div
+            className={`text-7xl font-bold font-mono tabular-nums leading-none transition-colors duration-150 ${textColor}`}
+            style={{ textShadow: `0 0 ${12 + pulse * 20}px ${glowColor}` }}
+          >
             {value.toFixed(1)}
             <span className="text-2xl ml-2 text-gray-400 font-normal">dB</span>
           </div>
           {isAlert ? (
-            <div className="flex items-center gap-1.5 mt-2">
+            <div className="flex items-center gap-1.5 mt-3">
               <AlertTriangle className="w-4 h-4 text-red-400 animate-bounce" />
               <span className="text-red-400 text-sm font-bold tracking-wide animate-pulse">
                 EXCEEDS LEGAL LIMIT
               </span>
             </div>
           ) : (
-            <div className="mt-2 text-gray-500 text-sm">
-              {isWarn ? "Approaching threshold" : "Within safe range"}
+            <div className="mt-3 text-sm">
+              <span className={isWarn ? "text-yellow-300" : "text-green-400"}>
+                {isWarn ? "Approaching threshold" : "Within safe range"}
+              </span>
+              <span className="text-gray-500 ml-2">
+                · Limit <span className="text-red-400 font-mono">{threshold} dB</span>
+              </span>
             </div>
           )}
         </div>
-        <div className="text-right text-xs text-gray-500 space-y-1 flex-shrink-0">
-          <div className="text-gray-400">
-            Peak: <span className="text-white font-mono">{peakDb.toFixed(1)} dB</span>
-          </div>
-          <div>
-            Limit: <span className="text-red-400 font-mono">{threshold} dB</span>
-          </div>
-          <div className="text-gray-600">LTO AO 2006-003</div>
+      </div>
+
+      {/* Highest recorded */}
+      <div className="md:w-64 bg-gray-900/60 border border-gray-700 rounded-xl p-5 flex flex-col justify-center">
+        <div className="flex items-center gap-2 text-xs text-gray-500 uppercase tracking-wider">
+          <AlertTriangle className="w-3.5 h-3.5" />
+          Highest dB Record
+        </div>
+        <div className={`text-5xl font-bold font-mono tabular-nums leading-none mt-2 ${maxColor}`}>
+          {maxRecorded.toFixed(1)}
+          <span className="text-xl ml-2 text-gray-500 font-normal">dB</span>
+        </div>
+        <div className="text-xs text-gray-500 mt-2">
+          {maxIsAlert ? "Violation threshold breached" : "Session peak"}
         </div>
       </div>
+    </div>
+  );
 
-      {/* Bar track */}
-      <div className="relative h-6 bg-gray-700/80 rounded-full overflow-visible">
-        {/* Fill */}
-        <div
-          className={`absolute top-0 left-0 h-full rounded-full transition-all duration-100 ${barColor} ${isAlert ? "shadow-[0_0_12px_rgba(239,68,68,0.6)]" : ""}`}
-          style={{ width: `${pct}%` }}
-        />
-        {/* Peak hold tick */}
-        {peakDb > 0 && (
-          <div
-            className="absolute top-0 h-full w-0.5 bg-white/80"
-            style={{ left: `${peakPct}%` }}
-          />
-        )}
-        {/* Threshold tick */}
-        <div
-          className="absolute top-0 bottom-0 w-0.5 bg-red-400/80"
-          style={{ left: `${(threshold / 140) * 100}%` }}
-        />
-      </div>
-
-      {/* Scale */}
-      <div className="flex justify-between text-xs text-gray-600 px-0.5">
-        {[0, 20, 40, 60, 80, 100, 120, 140].map((v) => (
-          <span key={v}>{v}</span>
-        ))}
-      </div>
-
-      {/* Sparkline history */}
-      <Sparkline data={history} threshold={threshold} />
+  return (
+    <div className="flex flex-col gap-5">
+      {top}
+      <LiveMonitor history={history} threshold={threshold} />
     </div>
   );
 }
@@ -249,32 +286,50 @@ function ViolationToast({
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [violations, setViolations] = useState<Violation[]>([]);
+  const [detections, setDetections] = useState<Detection[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [sysStatus, setSysStatus] = useState<SystemStatus | null>(null);
   const [liveDb, setLiveDb] = useState(0);
-  const [dbHistory, setDbHistory] = useState<number[]>(Array(DB_HISTORY_SIZE).fill(0));
-  const [peakDb, setPeakDb] = useState(0);
+  const [maxDb, setMaxDb] = useState(0);
+  const [dbHistory, setDbHistory] = useState<number[]>(Array(MONITOR_BARS).fill(0));
   const [wsConnected, setWsConnected] = useState(false);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [loading, setLoading] = useState(true);
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const [newIds, setNewIds] = useState<Set<number>>(new Set());
-  const [clock, setClock] = useState(new Date());
+  const [clock, setClock] = useState<Date | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const toastIdRef = useRef(0);
-  const peakDecayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Live clock
   useEffect(() => {
+    setClock(new Date());
     const t = setInterval(() => setClock(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
+  // Restore persisted highest dB on mount
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(MAX_DB_KEY);
+      if (raw) {
+        const n = parseFloat(raw);
+        if (!Number.isNaN(n)) setMaxDb(n);
+      }
+    } catch {}
+  }, []);
+
   const loadData = useCallback(async () => {
     try {
-      const [v, s, sys] = await Promise.all([getViolations(), getStats(), getSystemStatus()]);
+      const [v, d, s, sys] = await Promise.all([
+        getViolations(),
+        getDetections(),
+        getStats(),
+        getSystemStatus(),
+      ]);
       setViolations(v);
+      setDetections(d);
       setStats(s);
       setSysStatus(sys);
     } catch (e) {
@@ -283,6 +338,16 @@ export default function Dashboard() {
       setLoading(false);
     }
   }, []);
+
+  const handleResetDetections = useCallback(async () => {
+    try {
+      await resetDetections();
+      setDetections([]);
+      loadData();
+    } catch (e) {
+      console.error(e);
+    }
+  }, [loadData]);
 
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -295,16 +360,16 @@ export default function Dashboard() {
     const connect = () => {
       try {
         ws = createWebSocket((data: unknown) => {
-          const msg = data as { event: string; value?: number; data?: Violation };
+          const msg = data as { event: string; value?: number; data?: Violation | Detection };
           if (msg.event === "db_update" && msg.value !== undefined) {
             const val = msg.value as number;
             setLiveDb(val);
             setDbHistory((prev) => [...prev.slice(1), val]);
-            // Peak hold with 5 s decay
-            setPeakDb((prev) => {
-              if (val >= prev) {
-                if (peakDecayRef.current) clearTimeout(peakDecayRef.current);
-                peakDecayRef.current = setTimeout(() => setPeakDb(0), 5000);
+            setMaxDb((prev) => {
+              if (val > prev) {
+                try {
+                  localStorage.setItem(MAX_DB_KEY, String(val));
+                } catch {}
                 return val;
               }
               return prev;
@@ -323,6 +388,9 @@ export default function Dashboard() {
             const id = ++toastIdRef.current;
             setToasts((prev) => [...prev, { id, violation: v }]);
             loadData();
+          } else if (msg.event === "new_detection" && msg.data) {
+            const d = msg.data as unknown as Detection;
+            setDetections((prev) => [d, ...prev].slice(0, 100));
           }
         });
         ws.onopen = () => setWsConnected(true);
@@ -367,12 +435,12 @@ export default function Dashboard() {
 
           <div className="flex items-center gap-4">
             {/* Live clock */}
-            <div className="text-right hidden sm:block">
+            <div className="text-right hidden sm:block min-w-[120px]">
               <p className="text-white font-mono text-sm font-semibold tabular-nums">
-                {clock.toLocaleTimeString("en-PH")}
+                {clock ? clock.toLocaleTimeString("en-PH", { timeZone: PH_TZ, hour12: true }) : "--:--:-- --"}
               </p>
               <p className="text-gray-500 text-xs">
-                {clock.toLocaleDateString("en-PH", { weekday: "short", month: "short", day: "numeric" })}
+                {clock ? `${clock.toLocaleDateString("en-PH", { timeZone: PH_TZ, weekday: "short", month: "short", day: "numeric" })} · PHT` : "Loading..."}
               </p>
             </div>
             <div className="h-6 w-px bg-gray-700 hidden sm:block" />
@@ -405,6 +473,91 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-8 space-y-8">
+        {/* ── Live Feed + Detection Log ── */}
+        <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="lg:col-span-2 bg-black border border-gray-700 rounded-xl overflow-hidden relative">
+            <div className="flex items-center justify-between px-4 py-2 bg-gray-900/80 border-b border-gray-700">
+              <h2 className="font-semibold flex items-center gap-2 text-sm">
+                <Camera className="w-4 h-4 text-green-400" />
+                Live Detection Feed
+              </h2>
+              <span className="text-xs text-gray-400">
+                Unique vehicles: <span className="text-white font-mono">{sysStatus?.unique_vehicles ?? 0}</span>
+              </span>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`${API_URL}/api/video_feed`}
+              alt="Live detection feed"
+              className="w-full aspect-video object-contain bg-black"
+            />
+          </div>
+          <div className="bg-gray-800 border border-gray-700 rounded-xl flex flex-col min-h-[320px]">
+            <div className="flex items-center justify-between px-4 py-2 border-b border-gray-700">
+              <h2 className="font-semibold flex items-center gap-2 text-sm">
+                <Activity className="w-4 h-4 text-green-400" />
+                Detection Log
+                <span className="bg-green-600/20 text-green-300 text-[10px] px-2 py-0.5 rounded-full tabular-nums">
+                  {detections.length}
+                </span>
+              </h2>
+              <button
+                onClick={handleResetDetections}
+                className="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded transition"
+                title="Clear the dedup cache so vehicles can be re-logged"
+              >
+                Reset
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto max-h-[420px]">
+              {detections.length === 0 ? (
+                <div className="text-center py-10 text-gray-500 text-sm">
+                  Waiting for detections…
+                </div>
+              ) : (
+                <ul className="divide-y divide-gray-700/50">
+                  {detections.map((d) => (
+                    <li
+                      key={d.id}
+                      className="px-4 py-2.5 flex items-center gap-3 hover:bg-gray-700/30 transition"
+                    >
+                      <div className="w-1.5 h-1.5 rounded-full bg-green-400 flex-shrink-0" />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm text-white capitalize">
+                            {d.class_name}
+                          </span>
+                          <span className="text-[10px] text-gray-500 font-mono">
+                            #{d.track_id}
+                          </span>
+                        </div>
+                        <div className="text-xs text-gray-500 tabular-nums">
+                          {new Date(d.timestamp).toLocaleTimeString("en-PH", { timeZone: PH_TZ, hour12: true })}
+                          <span className="ml-2 text-gray-600">
+                            conf {(d.confidence * 100).toFixed(0)}%
+                          </span>
+                        </div>
+                      </div>
+                      {d.image_path && (
+                        <button
+                          onClick={() =>
+                            setSelectedImage(
+                              `${API_URL}/${d.image_path?.replace(/^\.\//, "")}`
+                            )
+                          }
+                          className="text-blue-400 hover:text-blue-300 text-xs"
+                        >
+                          <Camera className="w-3 h-3" />
+                        </button>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </section>
+
         {/* ── Live Monitor ── */}
         <section
           className={`border rounded-xl p-6 transition-all duration-500 ${
@@ -431,7 +584,7 @@ export default function Dashboard() {
               </span>
             </div>
           </div>
-          <DbMeter value={liveDb} threshold={threshold} history={dbHistory} peakDb={peakDb} />
+          <DbMeter value={liveDb} threshold={threshold} maxRecorded={maxDb} history={dbHistory} />
         </section>
 
         {/* ── Stats ── */}
@@ -503,7 +656,7 @@ export default function Dashboard() {
               </div>
             ) : filtered.length === 0 ? (
               <div className="text-center py-16 text-gray-500">
-                <Volume2 className="w-12 h-12 mx-auto mb-3 opacity-20" />
+                <AlertTriangle className="w-12 h-12 mx-auto mb-3 opacity-20" />
                 <p>No violations recorded yet.</p>
               </div>
             ) : (
@@ -564,7 +717,7 @@ export default function Dashboard() {
                             </span>
                           </td>
                           <td className="px-4 py-3 text-gray-400 tabular-nums text-xs">
-                            {new Date(v.timestamp).toLocaleString("en-PH")}
+                            {new Date(v.timestamp).toLocaleString("en-PH", { timeZone: PH_TZ })}
                           </td>
                           <td className="px-4 py-3 text-gray-300">{v.location}</td>
                           <td className="px-4 py-3">

@@ -85,6 +85,7 @@ cd backend
 cp .env.example .env
 # Edit .env — set RTSP_URL to your camera's address
 pip install -r requirements.txt
+source venv/Scripts/activate
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 

@@ -5,7 +5,7 @@ from models import Base
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:password@localhost:5432/thesis_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./thesis.db")
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)

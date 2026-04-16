@@ -1,51 +1,54 @@
+import os
 import numpy as np
 import time
 import threading
 import logging
-from scipy.fft import fft
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, sosfiltfilt
 
 logger = logging.getLogger(__name__)
 
 MUFFLER_FREQ_LOW = 50
 MUFFLER_FREQ_HIGH = 1000
 
+# dB calibration offset (dBFS -> dB SPL). Override via DB_CALIBRATION_OFFSET env var.
+DB_CALIBRATION_OFFSET = float(os.getenv("DB_CALIBRATION_OFFSET", "94.0"))
 
-def butter_bandpass(lowcut: float, highcut: float, fs: float, order: int = 5):
+
+def butter_bandpass_sos(lowcut: float, highcut: float, fs: float, order: int = 4):
     nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype="band")
-    return b, a
+    low = max(1e-6, lowcut / nyq)
+    high = min(0.9999, highcut / nyq)
+    return butter(order, [low, high], btype="band", output="sos")
 
 
-def compute_db_fft(audio_chunk: np.ndarray, sample_rate: int = 44100) -> float:
-    """Compute dB level using FFT focused on muffler frequency range (50-1000Hz)."""
-    if len(audio_chunk) == 0:
+def compute_db(audio_chunk: np.ndarray, sample_rate: int = 44100) -> float:
+    """
+    Compute an SPL-style dB reading from a PCM chunk:
+      1. Normalize int16 → float in [-1, 1]
+      2. Bandpass 50–1000 Hz (muffler range)
+      3. RMS → dBFS → dB SPL via fixed calibration offset
+    """
+    if audio_chunk is None or len(audio_chunk) == 0:
         return 0.0
 
-    if audio_chunk.dtype != np.float32:
-        audio_chunk = audio_chunk.astype(np.float32) / 32768.0
+    if audio_chunk.dtype == np.int16:
+        audio = audio_chunk.astype(np.float32) / 32768.0
+    elif audio_chunk.dtype != np.float32:
+        audio = audio_chunk.astype(np.float32)
+    else:
+        audio = audio_chunk
 
-    try:
-        b, a = butter_bandpass(MUFFLER_FREQ_LOW, MUFFLER_FREQ_HIGH, sample_rate)
-        filtered = filtfilt(b, a, audio_chunk)
-    except Exception:
-        filtered = audio_chunk
-
-    N = len(filtered)
-    fft_vals = np.abs(fft(filtered))[:N // 2]
-    freqs = np.fft.rfftfreq(N, d=1.0 / sample_rate)
-
-    mask = (freqs >= MUFFLER_FREQ_LOW) & (freqs <= MUFFLER_FREQ_HIGH)
-    band_energy = np.sum(fft_vals[mask] ** 2)
-
-    if band_energy <= 0:
+    rms = float(np.sqrt(np.mean(audio.astype(np.float64) ** 2)))
+    if rms <= 1e-9:
         return 0.0
 
-    db = 10 * np.log10(band_energy + 1e-10)
-    db_normalized = db + 60  # calibration offset - adjust during field testing
-    return float(np.clip(db_normalized, 0, 140))
+    dbfs = 20.0 * np.log10(rms)
+    db_spl = dbfs + DB_CALIBRATION_OFFSET
+    return float(np.clip(db_spl, 0.0, 140.0))
+
+
+# Back-compat alias
+compute_db_fft = compute_db
 
 
 class AcousticTrigger:

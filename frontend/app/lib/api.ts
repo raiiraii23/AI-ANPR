@@ -1,5 +1,7 @@
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+export const API_BASE = API_URL;
+
 export interface Violation {
   id: number;
   plate_number: string | null;
@@ -12,12 +14,22 @@ export interface Violation {
   notes: string | null;
 }
 
+export interface Detection {
+  id: number;
+  track_id: number;
+  class_name: string;
+  confidence: number;
+  timestamp: string;
+  image_path: string | null;
+}
+
 export interface Stats {
   total: number;
   pending: number;
   cited: number;
   dismissed: number;
   avg_decibel: number;
+  detections: number;
 }
 
 export interface SystemStatus {
@@ -25,12 +37,24 @@ export interface SystemStatus {
   current_db: number;
   threshold_db: number;
   trigger_duration_ms: number;
+  unique_vehicles: number;
 }
 
 export async function getViolations(limit = 50, offset = 0): Promise<Violation[]> {
   const res = await fetch(`${API_URL}/api/violations?limit=${limit}&offset=${offset}`);
   if (!res.ok) throw new Error("Failed to fetch violations");
   return res.json();
+}
+
+export async function getDetections(limit = 50, offset = 0): Promise<Detection[]> {
+  const res = await fetch(`${API_URL}/api/detections?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw new Error("Failed to fetch detections");
+  return res.json();
+}
+
+export async function resetDetections(): Promise<void> {
+  const res = await fetch(`${API_URL}/api/detections/reset`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to reset detections");
 }
 
 export async function getStats(): Promise<Stats> {
